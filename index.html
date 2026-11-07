@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MicroLok Logic Visualiser</title>
+
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+
+<style>
+body{
+    margin:0;
+    font-family:Arial;
+}
+
+#toolbar{
+    padding:10px;
+    background:#eee;
+}
+
+#mynetwork{
+    width:100%;
+    height:90vh;
+    border-top:1px solid #ccc;
+}
+
+#container
+{
+    display:flex;
+    flex-direction:column;
+    height:90vh;
+}
+
+#mynetwork
+{
+    flex:1;
+    min-height:200px;
+}
+
+#infoPanel
+{
+    height:200px;
+    min-height:100px;
+    max-height:60vh;
+
+    border-top:1px solid #ccc;
+
+    overflow:auto;
+    resize:vertical;
+
+    padding:10px;
+    font-family:Consolas, monospace;
+    white-space:pre-wrap;
+}
+
+#legend
+{
+    padding: 5px 10px;
+    background: #f8f8f8;
+    border-top: 1px solid #ccc;
+    border-bottom: 1px solid #ccc;
+
+    display:flex;
+    gap:20px;
+    flex-wrap:wrap;
+
+    font-size:12px;
+}
+
+.legend-item
+{
+    display:flex;
+    align-items:center;
+    gap:6px;
+}
+
+.legend-colour
+{
+    width:16px;
+    height:16px;
+    border:1px solid #000;
+    display:inline-block;
+}
+
+.low
+{
+    background:#ffffff;
+}
+
+.medium
+{
+    background:#ffaaaa;
+}
+
+.high
+{
+    background:#ff0000;
+}
+
+.timer
+{
+    background:#ffd700;
+}
+
+.legend-line
+{
+    width:20px;
+    border-top:2px dashed red;
+}
+
+.input
+{
+    background:#90EE90;
+}
+
+.output
+{
+    background:#ADD8E6;
+}
+
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+
+    <input type="file" id="fileInput">
+
+    <input type="text"
+           id="searchBox"
+           placeholder="Search for rung...">
+
+    <button id="searchBtn">Find</button>
+
+</div>
+
+<div id="legend">
+
+    <span class="legend-item">
+        <span class="legend-colour low"></span>
+        Few Connections
+    </span>
+
+    <span class="legend-item">
+        <span class="legend-colour medium"></span>
+        Medium Connections
+    </span>
+
+    <span class="legend-item">
+        <span class="legend-colour high"></span>
+        Highly Connected
+    </span>
+
+    <span class="legend-item">
+        <span class="legend-colour timer"></span>
+        Timer
+    </span>
+
+    <span class="legend-item">
+        <span class="legend-line"></span>
+        Inverted Logic (~)
+    </span>
+
+    <span class="legend-item">
+        <span class="legend-colour input"></span>
+        Input Signal
+    </span>
+
+    <span class="legend-item">
+        <span class="legend-colour output"></span>
+        Derived Output
+    </span>
+
+
+</div>
+
+<div id="container">
+
+    <div id="mynetwork"></div>
+
+    <div id="infoPanel">
+        Click a rung above to see boolean logic (Red or blue bubbles) ...
+    </div>
+
+</div>
+
+
+
+<script>
+
+document.getElementById('fileInput')
+.addEventListener('change', loadFile);
+
+let network;
+let allNodes;
+
+function loadFile(e)
+{
+    const file = e.target.files[0];
+
+    if(!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = function()
+    {
+
+	const rawText = reader.result;
+	const cleanedText = stripMicrolokComments(rawText);
+        buildGraph(cleanedText);
+    };
+
+    reader.readAsText(file);
+}
+
+
+function stripMicrolokComments(text) {
+  let out = [];
+  let i = 0;
+
+  while (i < text.length) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    // Remove /* ... */ comments, preserving line breaks.
+    if (ch === '/' && next === '*') {
+      const end = text.indexOf('*/', i + 2);
+
+      if (end === -1) {
+        // Unterminated block comment: remove the remainder.
+        const remainder = text.slice(i);
+        out.push(remainder.replace(/[^\n]/g, ''));
+        break;
+      }
+
+      const block = text.slice(i, end + 2);
+      out.push(block.replace(/[^\n]/g, ''));
+      i = end + 2;
+      continue;
+    }
+
+    // Remove % ... \ comments.
+    // The comment starts at % and ends at the next unescaped backslash.
+    if (ch === '%') {
+      let j = i + 1;
+
+      while (j < text.length) {
+        // A backslash immediately before another backslash is an escaped backslash.
+        if (text[j] === '\\' && text[j + 1] === '\\') {
+          j += 2;
+          continue;
+        }
+
+        if (text[j] === '\\') {
+          j++; // include the terminating backslash
+          break;
+        }
+
+        j++;
+      }
+
+      // Preserve newlines from the removed comment so line-based parsing stays aligned.
+      const comment = text.slice(i, j);
+      out.push(comment.replace(/[^\n]/g, ''));
+      i = j;
+      continue;
+    }
+
+    // Remove // line comments, preserving the newline.
+    if (ch === '/' && next === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+
+    out.push(ch);
+    i++;
+  }
+
+  return out.join('');
+}
+
+
+function buildGraph(text)
+{
+    const timerNodes = new Set();
+    const nodes = new Map();
+    const edges = [];
+
+    const nodeRungs = new Map();
+
+    const timerMatch = text.match(
+        /TIMER\s+([\s\S]*?)\s+BEGIN/i
+    );
+
+    if(timerMatch)
+    {
+        const timerText = timerMatch[1];
+
+        const names = timerText.match(/\b[0-9A-Z]+\b/g) || [];
+
+        names.forEach(name =>
+        {
+            // Ignore keywords
+            if(
+                name !== "SET" &&
+                name !== "CLEAR" &&
+                name !== "SEC"
+            )
+            {
+                timerNodes.add(name);
+            }
+        });
+    }
+
+    const assignRegex =
+        /ASSIGN\s+([\s\S]*?)\s+TO\s+([^;]+);/gi;
+
+    let match;
+
+    while((match = assignRegex.exec(text)) !== null)
+    {
+        const fullRung = match[0].trim();
+
+        const expression = match[1];
+        const targets = match[2]
+            .split(',')
+            .map(x => x.trim());
+
+        const sourceTokens =
+            expression.match(/~?[A-Z0-9]+(?:\/[A-Z0-9]+)*/gi) || [];
+
+        targets.forEach(target =>
+        {
+            if(!nodeRungs.has(target))
+            {
+                nodeRungs.set(target, []);
+            }
+
+            nodeRungs.get(target).push(fullRung);
+
+            if(!nodes.has(target))
+            {
+                nodes.set(target,{
+                    id: target,
+                    label: target
+                });
+            }
+
+            sourceTokens.forEach(token =>
+            {
+                const inverted = token.startsWith("~");
+
+                const source =
+                    inverted ? token.substring(1) : token;
+                if(source === target) return;
+
+                if(!nodes.has(source))
+                {
+                    nodes.set(source,{
+                        id: source,
+                        label: source
+                    });
+                }
+
+                edges.push({
+                    from: source,
+                    to: target,
+                    arrows: 'to',
+
+                    color: inverted
+                        ? { color: '#FF0000' }
+                        : { color: '#808080' },
+
+                    dashes: inverted
+                });
+
+            });
+        });
+    }
+
+
+    // Count connections for each node
+    const connectionCount = {};
+
+    nodes.forEach((_, id) => {
+        connectionCount[id] = 0;
+    });
+
+    edges.forEach(edge => {
+        connectionCount[edge.from]++;
+        connectionCount[edge.to]++;
+    });
+
+    // Find maximum degree for scaling
+    const maxConnections = Math.max(...Object.values(connectionCount), 1);
+
+    // Colour nodes according to number of connections
+    nodes.forEach((node, id) => {
+
+        if(timerNodes.has(id))
+        {
+            node.shape = "box";
+
+            node.color = {
+                background: "#FFD700",
+                border: "#000000"
+            };
+        }
+        else
+        {
+            const ratio =
+                connectionCount[id] / maxConnections;
+
+            const red = 255;
+            const greenBlue =
+                Math.round(255 * (1 - ratio));
+
+            node.color = {
+                background:
+                    `rgb(${red},${greenBlue},${greenBlue})`,
+                border: 'black'
+            };
+        }
+        // Optional: make busy nodes larger too
+        node.value = connectionCount[id];
+    });
+
+
+    const inDegree = {};
+    const outDegree = {};
+
+    nodes.forEach((_, id) => {
+        inDegree[id] = 0;
+        outDegree[id] = 0;
+    });
+
+    edges.forEach(edge => {
+        outDegree[edge.from]++;
+        inDegree[edge.to]++;
+    });
+
+    nodes.forEach((node, id) => {
+        if (inDegree[id] === 0) {
+            node.color = "#90EE90";   // input green
+        } else if (outDegree[id] === 0) {
+            node.color = "#ADD8E6";   // output blue
+        }
+    });
+
+
+    allNodes = nodes;
+
+    network = new vis.Network(
+        document.getElementById("mynetwork"),
+        {
+            nodes: Array.from(nodes.values()),
+            edges: edges
+        },
+        {
+            layout:{
+                improvedLayout:true
+            },
+
+            physics:{
+                enabled:true,
+                barnesHut:{
+                    gravitationalConstant:-6000
+                }
+            },
+
+            interaction:{
+                hover:true
+            }
+        }
+    );
+
+
+    
+
+    network.on("click", function(params)
+    {
+        if(params.nodes.length === 0)
+            return;
+
+        const nodeId = params.nodes[0];
+
+        const rungs =
+            nodeRungs.get(nodeId) || [];
+
+        document.getElementById("infoPanel")
+            .textContent =
+                rungs.join("\n\n");
+    });
+
+
+}
+
+document
+    .getElementById("searchBtn")
+    .addEventListener("click", searchNode);
+
+document
+    .getElementById("searchBox")
+    .addEventListener("keypress", function(e)
+{
+    if(e.key === "Enter")
+        searchNode();
+});
+
+function searchNode()
+{
+    const searchText =
+        document
+            .getElementById("searchBox")
+            .value
+            .trim()
+            .toUpperCase();
+
+    if(!searchText || !allNodes)
+        return;
+
+    const node =
+        Array.from(allNodes.values())
+        .find(n => n.id.toUpperCase() === searchText);
+
+    if(node)
+    {
+        network.selectNodes([node.id]);
+
+        network.focus(node.id,
+        {
+            scale: 1.8,
+            animation:
+            {
+                duration: 1000
+            }
+        });
+    }
+    else
+    {
+        alert("Signal not found");
+    }
+}
+
+</script>
+
+</body>
+</html>
